@@ -45,7 +45,12 @@ def main():
         client.connect((HOST, PORT))
         key1, key2, session_token = initialize_session(client)
 
-        message = f"Hello Server;TOKEN:{session_token}"
+        # Take input from the user
+        user_message = input("Enter your message: ")
+
+        # Append the session token to the user's message
+        message = f"{user_message};TOKEN:{session_token}"
+
         print(f"Sending message: {message}")
         client.sendall(message.encode())
 
