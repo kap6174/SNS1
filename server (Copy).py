@@ -1,21 +1,21 @@
-from collections import defaultdict
-from datetime import datetime, timedelta
 import socket
 import secrets
 import hashlib
-from threading import Lock, Thread
+import select
+import time
+from datetime import datetime, timedelta
 from Crypto.Cipher import DES
-import os
+from collections import defaultdict
+from threading import Lock, Thread
 
 HOST = '127.0.0.1'
 PORT = 65432
-running = True
 
-client_keys = {}  # Stores keys per client: {addr: (key1, key2)}
+# Global variables for server state with thread-safe access
 client_sessions = {}  # {client_addr: {'token': str, 'expiry': datetime, 'key1': bytes, 'key2': bytes}}
 client_data = defaultdict(list)  # Store messages for each client
 sessions_lock = Lock()  # Lock for thread-safe access to session data
-
+running = True
 
 def generate_keys(shared_secret):
     # Derive two 56-bit keys from the shared secret
@@ -41,10 +41,7 @@ def check_session_expiry(addr):
                 response = f"Session expired. Stored messages: {stored_data}"
                 try:
                     key1 = client_sessions[addr]['key1']
-                    # Pad the message to be a multiple of 8 bytes
-                    padding_length = 8 - (len(response) % 8)
-                    padded_response = response + ' ' * padding_length
-                    encrypted_response = encrypt_message(padded_response, key1)
+                    encrypted_response = encrypt_message(response, key1)
                     return True, encrypted_response
                 except Exception as e:
                     print(f"Error encrypting expiry message: {e}")
@@ -53,30 +50,32 @@ def check_session_expiry(addr):
                     del client_data[addr]
     return False, None
 
+
 def handle_client_connection(client_socket, addr):
     try:
-        print(f"Connected by {addr}")
-
-        # Initial connection setup remains the same...
-        p = 23  # A prime number
-        g = 5   # A primitive root modulo p
+        # DH Key Exchange
+        p, g = 23, 5
         private_key = secrets.randbelow(p - 1)
         public_key = pow(g, private_key, p)
+        
 
-        # For initial handshake, don't use timeout
-        client_socket.settimeout(None)
-        client_public_key = int(client_socket.recv(1024).decode())
-        client_socket.sendall(str(public_key).encode())
+        # Receive client's public key as bytes
+        client_public_key_data = client_socket.recv(1024)
+        if not client_public_key_data:
+            raise ValueError('No data received for client public key')
 
+        # Decode safely using UTF-8
+        client_public_key = (client_public_key_data)
+        print('Public Key of Client:', client_public_key)
+
+        # Send server's public key back to the client
+        client_socket.sendall(str(public_key))
+        print('Sent Public Key to Client:', public_key)
+        
         shared_secret = pow(client_public_key, private_key, p)
         key1, key2 = generate_keys(shared_secret)
         
-        client_keys[addr] = (key1, key2)
-        
-        print(f"Derived keys for {addr} - Key1: {key1.hex()}, Key2: {key2.hex()}")
-        print("The shared secret is :", shared_secret)
-
-        # Generate and send encrypted session token
+        # Generate and send session token
         session_token = generate_session_token()
         encrypted_token = encrypt_message(session_token, key1)
         client_socket.sendall(encrypted_token)
@@ -89,12 +88,8 @@ def handle_client_connection(client_socket, addr):
                 'key1': key1,
                 'key2': key2
             }
-        if addr not in client_data:
-            client_data[addr] = []
-        print(f"Session initialized for {addr}")
         
-        # Set timeout for subsequent communications
-        client_socket.settimeout(1)
+        print(f"Session initialized for {addr}")
         
         while True:
             # Check for session expiry
@@ -108,7 +103,7 @@ def handle_client_connection(client_socket, addr):
             try:
                 data = client_socket.recv(1024)
                 if not data:
-                    continue  # Don't break on empty data, just continue waiting
+                    break
                 
                 message = data.decode()
                 print(f"Received from {addr}: {message}")
@@ -140,11 +135,8 @@ def handle_client_connection(client_socket, addr):
                     response = f"Message stored. Session expires at {expiry_time}"
                     client_socket.sendall(response.encode())
                 
-            except socket.timeout:
-                continue  # On timeout, just continue the loop
-            except socket.error as e:
-                print(f"Socket error for {addr}: {e}")
-                break  # Only break on actual socket errors
+            except socket.error:
+                break
                 
     except Exception as e:
         print(f"Error handling client {addr}: {e}")
@@ -159,33 +151,3 @@ def handle_client_connection(client_socket, addr):
         client_socket.close()
 
 
-
-def main():
-    global running
-    
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((HOST, PORT))
-    server_socket.listen()
-    
-    print(f"Server listening on {HOST}:{PORT}")
-    
-    while running:
-        try:
-            client_socket, addr = server_socket.accept()
-            # Create new thread for each client connection
-            client_thread = Thread(target=handle_client_connection, args=(client_socket, addr))
-            client_thread.daemon = True  # Make thread daemon so it exits when main thread exits
-            client_thread.start()
-            print(f"New client thread started for {addr}")
-            
-        except KeyboardInterrupt:
-            print("\nShutting down server...")
-            break
-        except Exception as e:
-            print(f"Error accepting connection: {e}")
-    
-    server_socket.close()
-
-if __name__ == "__main__":
-   main()
